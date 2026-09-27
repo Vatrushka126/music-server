@@ -3,3 +3,4 @@ uvicorn
 cloudscraper
 certifi
 beautifulsoup4
+requests
