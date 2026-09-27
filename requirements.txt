@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+cloudscraper
+certifi
+beautifulsoup4
