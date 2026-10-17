@@ -39,8 +39,10 @@ DEEZER_URL = "https://api.deezer.com"
 MUSIC_HITMO_URL = "https://music.hitmo.net"
 HITMO_STREAM_URL = "https://d1.hitmo.net/"
 
-BASE_URL = "https://music-server-za5e.onrender.com"
-
+BASE_URL = (
+    "https://bbap8oehkdt34mg4oors"
+    ".containers.yandexcloud.net"
+)
 
 COVER_PROXY = BASE_URL + "/cover?url="
 
