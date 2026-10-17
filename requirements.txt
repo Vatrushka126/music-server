@@ -1,6 +1,3 @@
 fastapi
-uvicorn
-cloudscraper
-certifi
-beautifulsoup4
-boto3
+uvicorn[standard]
+requests
