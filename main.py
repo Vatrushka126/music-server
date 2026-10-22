@@ -13,6 +13,8 @@
 """
 
 import os
+import threading
+import time
 
 import requests
 from fastapi import FastAPI, Query, Request
@@ -53,6 +55,45 @@ def forbidden(request: Request):
 def health():
 
     return {"ok": True}
+
+
+# Бесплатный Render усыпляет сервис после 15 минут без запросов.
+# Пока сервис проснулся, он сам раз в 10 минут обращается к своему
+# публичному адресу (RENDER_EXTERNAL_URL задаёт сам Render), и это
+# считается обычным входящим запросом: сервис не засыпает.
+# Если вдруг уснёт, его разбудит первый запрос из приложения
+# (приложение пингует /health при каждом запуске). Надёжнее всего
+# дополнительно завести бесплатный монитор (UptimeRobot) на /health.
+KEEP_ALIVE_SECONDS = 600
+
+
+def keep_alive():
+
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+
+    if not url:
+        return
+
+    while True:
+
+        time.sleep(KEEP_ALIVE_SECONDS)
+
+        try:
+
+            requests.get(url + "/health", timeout=20)
+
+        except Exception as e:
+
+            print("KEEP ALIVE ERROR:", repr(e))
+
+
+@app.on_event("startup")
+def start_keep_alive():
+
+    threading.Thread(
+        target=keep_alive,
+        daemon=True
+    ).start()
 
 
 @app.get("/lyrics/{path}")
