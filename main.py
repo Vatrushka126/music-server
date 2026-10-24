@@ -330,6 +330,61 @@ def yandex_artist(
         )
 
 
+@app.get("/yandex/artists/search")
+def yandex_artists_search(
+    request: Request,
+    q: str = Query(..., min_length=1),
+    limit: int = Query(15, ge=1, le=40)
+):
+
+    # Исполнители в том порядке, в котором их выдаёт Яндекс Музыка.
+    denied = forbidden(request)
+
+    if denied:
+        return denied
+
+    client = get_yandex()
+
+    if client is None:
+        return yandex_unavailable()
+
+    try:
+
+        result = client.search(q, type_="artist")
+
+        found = getattr(
+            getattr(result, "artists", None),
+            "results",
+            None
+        ) or []
+
+        artists = []
+
+        for artist in found[:limit]:
+
+            cover = getattr(artist, "cover", None)
+
+            artists.append({
+                "id": artist.id,
+                "name": artist.name,
+                "cover_url": ym_cover(
+                    getattr(cover, "uri", None),
+                    "400x400"
+                )
+            })
+
+        return {"success": True, "artists": artists}
+
+    except Exception as e:
+
+        print("YANDEX ARTISTS SEARCH ERROR:", repr(e))
+
+        return JSONResponse(
+            status_code=502,
+            content={"success": False, "error": str(e)}
+        )
+
+
 def ym_collect_albums(fetch, also, seen, out):
 
     # Постранично собирает альбомы исполнителя (до 4 страниц по 50).
@@ -545,7 +600,11 @@ def yandex_new_release_tracks(
 
                 album, tracks = ym_album_tracks(client, album_id)
 
-                cover = ym_cover(getattr(album, "cover_uri", None))
+                # Обложка в высоком качестве (1000x1000).
+                cover = ym_cover(
+                    getattr(album, "cover_uri", None),
+                    "1000x1000"
+                )
 
                 return [
                     {
