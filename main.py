@@ -526,6 +526,108 @@ def ym_album_tracks(client, album_id):
     return album, tracks
 
 
+# Треки всех релизов исполнителя одним запросом: приложение просит это
+# один раз вместо отдельного запроса на каждый альбом. Результат
+# хранится в памяти.
+_release_tracks_cache = {}
+
+RELEASE_TRACKS_CACHE_SECONDS = 30 * 60
+
+
+@app.get("/yandex/artist/{artist_id}/release-tracks")
+def yandex_artist_release_tracks(artist_id: int, request: Request):
+
+    denied = forbidden(request)
+
+    if denied:
+        return denied
+
+    client = get_yandex()
+
+    if client is None:
+        return yandex_unavailable()
+
+    cached = _release_tracks_cache.get(artist_id)
+
+    if (
+        cached
+        and time.time() - cached[0] < RELEASE_TRACKS_CACHE_SECONDS
+    ):
+
+        return {"success": True, "albums": cached[1]}
+
+    albums = []
+
+    seen = set()
+
+    try:
+
+        ym_collect_albums(
+            lambda page: client.artists_direct_albums(
+                artist_id,
+                page=page,
+                page_size=50,
+                sort_by="year"
+            ),
+            False,
+            seen,
+            albums
+        )
+
+    except Exception as e:
+
+        print("YANDEX RELEASE TRACKS ERROR:", repr(e))
+
+        return JSONResponse(
+            status_code=502,
+            content={"success": False, "error": str(e)}
+        )
+
+    try:
+
+        ym_collect_albums(
+            lambda page: client.artists_also_albums(
+                artist_id,
+                page=page,
+                page_size=50,
+                sort_by="year"
+            ),
+            True,
+            seen,
+            albums
+        )
+
+    except Exception as e:
+
+        print("YANDEX ALSO ALBUMS:", repr(e))
+
+    def load(album):
+
+        try:
+
+            _, tracks = ym_album_tracks(client, album["id"])
+
+            return str(album["id"]), tracks
+
+        except Exception as e:
+
+            print("RELEASE TRACKS ALBUM ERROR:", album["id"], repr(e))
+
+            return str(album["id"]), None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+
+        results = list(pool.map(load, albums[:80]))
+
+    data = {key: tracks for key, tracks in results if tracks is not None}
+
+    if data:
+
+        _release_tracks_cache[artist_id] = (time.time(), data)
+
+    return {"success": True, "albums": data}
+
+
 @app.get("/yandex/album/{album_id}/tracks")
 def yandex_album_tracks(album_id: int, request: Request):
 
