@@ -657,6 +657,97 @@ def yandex_album_tracks(album_id: int, request: Request):
         )
 
 
+_duration_cache = {}
+
+
+@app.get("/yandex/track-duration")
+def yandex_track_duration(
+    request: Request,
+    artist: str = Query(..., min_length=1),
+    title: str = Query(..., min_length=1)
+):
+
+    # Длительность трека по Яндекс Музыке: для проверки, тот ли файл
+    # играет.
+    denied = forbidden(request)
+
+    if denied:
+        return denied
+
+    client = get_yandex()
+
+    if client is None:
+        return yandex_unavailable()
+
+    cache_key = ym_norm(artist) + "|" + ym_norm(title)
+
+    if cache_key in _duration_cache:
+
+        return {
+            "success": True,
+            "duration": _duration_cache[cache_key]
+        }
+
+    try:
+
+        short = re.sub(r"\(.*?\)|\[.*?\]", " ", title).strip() or title
+
+        result = client.search(f"{artist} {short}", type_="track")
+
+        found = getattr(
+            getattr(result, "tracks", None),
+            "results",
+            None
+        ) or []
+
+        wanted_title = ym_norm(short)
+
+        wanted_artists = [
+            ym_norm(part)
+            for part in re.split(
+                r",|&|;|\bfeat\.?\b|\bft\.?\b|\bx\b",
+                artist,
+                flags=re.IGNORECASE
+            )
+            if ym_norm(part)
+        ]
+
+        for track in found:
+
+            names = [
+                ym_norm(a.name)
+                for a in (getattr(track, "artists", None) or [])
+            ]
+
+            title_ok = ym_norm(track.title or "") == wanted_title
+
+            artist_ok = any(
+                w in n or n in w
+                for w in wanted_artists
+                for n in names
+                if n
+            )
+
+            seconds = int((getattr(track, "duration_ms", 0) or 0) / 1000)
+
+            if title_ok and artist_ok and seconds > 0:
+
+                _duration_cache[cache_key] = seconds
+
+                return {"success": True, "duration": seconds}
+
+        return {"success": False, "error": "Не найден"}
+
+    except Exception as e:
+
+        print("YANDEX DURATION ERROR:", repr(e))
+
+        return JSONResponse(
+            status_code=502,
+            content={"success": False, "error": str(e)}
+        )
+
+
 # Треки новинок собираются долго (запрос на каждый альбом), поэтому
 # результат хранится в памяти несколько часов.
 _new_cache = {"at": 0.0, "data": []}
