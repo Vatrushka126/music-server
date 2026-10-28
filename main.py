@@ -216,11 +216,14 @@ YANDEX_TOKEN = os.environ.get("YANDEX_TOKEN", "").strip()
 _yandex_client = None
 
 
+_yandex_last_error = ""
+
+
 def get_yandex():
 
     # Клиент создаётся при первом обращении: если токена нет или
     # Яндекс не отвечает, остальной сервер продолжает работать.
-    global _yandex_client
+    global _yandex_client, _yandex_last_error
 
     if _yandex_client is None and YANDEX_TOKEN:
 
@@ -232,9 +235,81 @@ def get_yandex():
 
         except Exception as e:
 
+            _yandex_last_error = "подключение: " + repr(e)
+
             print("Ошибка подключения Яндекс Музыки:", repr(e))
 
     return _yandex_client
+
+
+def reset_yandex(error=None):
+
+    # После сбоя клиент пересоздаётся при следующем обращении:
+    # так "залипшая" сессия не ломает все запросы.
+    global _yandex_client, _yandex_last_error
+
+    _yandex_client = None
+
+    if error is not None:
+        _yandex_last_error = repr(error)
+
+
+def ym_retry(fn):
+
+    # Вызывает fn(client) с одним повтором: после сбоя клиент
+    # создаётся заново.
+    last = None
+
+    for attempt in range(2):
+
+        client = get_yandex()
+
+        if client is None:
+
+            raise RuntimeError(
+                "Яндекс не подключён: "
+                + (_yandex_last_error or "YANDEX_TOKEN не задан")
+            )
+
+        try:
+
+            return fn(client)
+
+        except Exception as e:
+
+            last = e
+
+            print("YANDEX RETRY", attempt + 1, repr(e))
+
+            reset_yandex(e)
+
+            time.sleep(0.5)
+
+    raise last
+
+
+def ym_direct(artist_id, page):
+
+    return ym_retry(
+        lambda c: c.artists_direct_albums(
+            artist_id,
+            page=page,
+            page_size=50,
+            sort_by="year"
+        )
+    )
+
+
+def ym_also(artist_id, page):
+
+    return ym_retry(
+        lambda c: c.artists_also_albums(
+            artist_id,
+            page=page,
+            page_size=50,
+            sort_by="year"
+        )
+    )
 
 
 def yandex_unavailable():
@@ -268,6 +343,121 @@ def ym_artist_names(artists):
     )
 
 
+@app.get("/yandex/status")
+def yandex_status(request: Request):
+
+    # Состояние подключения к Яндекс Музыке (для проверки в приложении).
+    denied = forbidden(request)
+
+    if denied:
+        return denied
+
+    info = {
+        "success": True,
+        "token_set": bool(YANDEX_TOKEN),
+        "connected": False,
+        "search_ms": None,
+        "found": None,
+        "search_error": None
+    }
+
+    client = get_yandex()
+
+    info["connected"] = client is not None
+
+    if client is not None:
+
+        started = time.time()
+
+        try:
+
+            result = ym_retry(
+                lambda c: c.search("Pyrokinesis", type_="artist")
+            )
+
+            found = getattr(
+                getattr(result, "artists", None),
+                "results",
+                None
+            ) or []
+
+            info["found"] = len(found)
+
+        except Exception as e:
+
+            info["search_error"] = repr(e)
+
+        info["search_ms"] = int((time.time() - started) * 1000)
+
+    info["last_error"] = _yandex_last_error
+
+    return info
+
+
+_suggest_cache = {}
+
+
+@app.get("/yandex/suggest")
+def yandex_suggest(
+    request: Request,
+    q: str = Query(..., min_length=1)
+):
+
+    # Подсказки поиска от Яндекс Музыки.
+    denied = forbidden(request)
+
+    if denied:
+        return denied
+
+    key = q.strip().lower()
+
+    if key in _suggest_cache:
+
+        return {"success": True, "suggestions": _suggest_cache[key]}
+
+    try:
+
+        result = ym_retry(lambda c: c.search_suggest(q))
+
+        items = list(getattr(result, "suggestions", None) or [])
+
+        best = getattr(result, "best", None)
+
+        # best может быть строкой или объектом с текстом.
+        best_text = getattr(best, "text", best)
+
+        if isinstance(best_text, str) and best_text:
+
+            items.insert(0, best_text)
+
+        seen = set()
+
+        suggestions = []
+
+        for item in items:
+
+            if isinstance(item, str) and item.lower() not in seen:
+
+                seen.add(item.lower())
+
+                suggestions.append(item)
+
+        suggestions = suggestions[:8]
+
+        _suggest_cache[key] = suggestions
+
+        return {"success": True, "suggestions": suggestions}
+
+    except Exception as e:
+
+        print("YANDEX SUGGEST ERROR:", repr(e))
+
+        return JSONResponse(
+            status_code=502,
+            content={"success": False, "error": str(e)}
+        )
+
+
 @app.get("/yandex/artist")
 def yandex_artist(
     request: Request,
@@ -286,7 +476,7 @@ def yandex_artist(
 
     try:
 
-        result = client.search(name, type_="artist")
+        result = ym_retry(lambda c: c.search(name, type_="artist"))
 
         found = getattr(
             getattr(result, "artists", None),
@@ -350,7 +540,7 @@ def yandex_artists_search(
 
     try:
 
-        result = client.search(q, type_="artist")
+        result = ym_retry(lambda c: c.search(q, type_="artist"))
 
         found = getattr(
             getattr(result, "artists", None),
@@ -383,6 +573,25 @@ def yandex_artists_search(
             status_code=502,
             content={"success": False, "error": str(e)}
         )
+
+
+def ym_album_kind(album, album_type):
+
+    # single / compilation (сборники и трибьюты) / album.
+    if album_type == "single":
+        return "single"
+
+    title = (getattr(album, "title", "") or "").lower()
+
+    if (
+        album_type == "compilation"
+        or "tribute" in title
+        or "трибьют" in title
+        or "сборник" in title
+    ):
+        return "compilation"
+
+    return "album"
 
 
 def ym_collect_albums(fetch, also, seen, out):
@@ -418,7 +627,7 @@ def ym_collect_albums(fetch, also, seen, out):
                     getattr(album, "cover_uri", None)
                 ),
                 "track_count": getattr(album, "track_count", 0) or 0,
-                "kind": "single" if album_type == "single" else "album",
+                "kind": ym_album_kind(album, album_type),
                 "also": also,
                 "artists": ym_artist_names(
                     getattr(album, "artists", None)
@@ -454,12 +663,7 @@ def yandex_artist_releases(artist_id: int, request: Request):
 
         # Собственные релизы исполнителя.
         ym_collect_albums(
-            lambda page: client.artists_direct_albums(
-                artist_id,
-                page=page,
-                page_size=50,
-                sort_by="year"
-            ),
+            lambda page: ym_direct(artist_id, page),
             False,
             seen,
             albums
@@ -479,12 +683,7 @@ def yandex_artist_releases(artist_id: int, request: Request):
         # Релизы, где исполнитель участвует (синглы с другими
         # авторами). Не у всех версий библиотеки есть этот метод.
         ym_collect_albums(
-            lambda page: client.artists_also_albums(
-                artist_id,
-                page=page,
-                page_size=50,
-                sort_by="year"
-            ),
+            lambda page: ym_also(artist_id, page),
             True,
             seen,
             albums
@@ -499,7 +698,7 @@ def yandex_artist_releases(artist_id: int, request: Request):
 
 def ym_album_tracks(client, album_id):
 
-    album = client.albums_with_tracks(album_id)
+    album = ym_retry(lambda c: c.albums_with_tracks(album_id))
 
     tracks = []
 
@@ -563,12 +762,7 @@ def yandex_artist_release_tracks(artist_id: int, request: Request):
     try:
 
         ym_collect_albums(
-            lambda page: client.artists_direct_albums(
-                artist_id,
-                page=page,
-                page_size=50,
-                sort_by="year"
-            ),
+            lambda page: ym_direct(artist_id, page),
             False,
             seen,
             albums
@@ -586,12 +780,7 @@ def yandex_artist_release_tracks(artist_id: int, request: Request):
     try:
 
         ym_collect_albums(
-            lambda page: client.artists_also_albums(
-                artist_id,
-                page=page,
-                page_size=50,
-                sort_by="year"
-            ),
+            lambda page: ym_also(artist_id, page),
             True,
             seen,
             albums
@@ -692,7 +881,9 @@ def yandex_track_duration(
 
         short = re.sub(r"\(.*?\)|\[.*?\]", " ", title).strip() or title
 
-        result = client.search(f"{artist} {short}", type_="track")
+        result = ym_retry(
+            lambda c: c.search(f"{artist} {short}", type_="track")
+        )
 
         found = getattr(
             getattr(result, "tracks", None),
@@ -783,7 +974,7 @@ def yandex_new_release_tracks(
 
     try:
 
-        releases = client.new_releases()
+        releases = ym_retry(lambda c: c.new_releases())
 
         album_ids = list(releases.new_releases or [])[:40]
 
