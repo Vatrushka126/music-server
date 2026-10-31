@@ -642,6 +642,53 @@ def ym_collect_albums(fetch, also, seen, out):
             break
 
 
+@app.get("/yandex/artist/{artist_id}/similar")
+def yandex_artist_similar(artist_id: int, request: Request):
+
+    # Похожие исполнители из карточки Яндекс Музыки.
+    denied = forbidden(request)
+
+    if denied:
+        return denied
+
+    client = get_yandex()
+
+    if client is None:
+        return yandex_unavailable()
+
+    try:
+
+        info = ym_retry(lambda c: c.artists_brief_info(artist_id))
+
+        similar = getattr(info, "similar_artists", None) or []
+
+        artists = []
+
+        for artist in similar[:20]:
+
+            cover = getattr(artist, "cover", None)
+
+            artists.append({
+                "id": artist.id,
+                "name": artist.name,
+                "cover_url": ym_cover(
+                    getattr(cover, "uri", None),
+                    "400x400"
+                )
+            })
+
+        return {"success": True, "artists": artists}
+
+    except Exception as e:
+
+        print("YANDEX SIMILAR ERROR:", repr(e))
+
+        return JSONResponse(
+            status_code=502,
+            content={"success": False, "error": str(e)}
+        )
+
+
 @app.get("/yandex/artist/{artist_id}/releases")
 def yandex_artist_releases(artist_id: int, request: Request):
 
